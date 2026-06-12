@@ -1,0 +1,177 @@
+#!/usr/bin/env node
+/**
+ * Claude Usage API Server
+ * Runs Claude Code /usage and exposes as JSON API
+ * Runs inside Docker container
+ */
+
+const express = require('express');
+const { execSync } = require('child_process');
+const app = express();
+
+const PORT = 5000;
+let cache = {
+  session: "--",
+  weekly: "--",
+  status: "init",
+  timestamp: new Date().toISOString(),
+  lastError: null
+};
+
+// ============ Claude Usage Polling ============
+function pollClaudeUsage() {
+  try {
+    const output = execSync('claude -p /usage', {
+      encoding: 'utf-8',
+      timeout: 30000,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    console.log(`[${new Date().toISOString()}] Claude /usage output:\n${output}\n`);
+
+    // Parse output with regex
+    // Format: "Current session: 72% used · resets Jun 12, 2:39am (Europe/London)"
+    let session = "--";
+    let weekly = "--";
+    let sessionReset = "--";
+    let weeklyReset = "--";
+
+    const sessionMatch = output.match(/Current session:\s+(\d+)%.*?resets\s+([^(]+)/);
+    if (sessionMatch) {
+      session = `${sessionMatch[1]}%`;
+      sessionReset = sessionMatch[2].trim();
+    }
+
+    const weeklyMatch = output.match(/Current week.*?:\s+(\d+)%.*?resets\s+([^(]+)/);
+    if (weeklyMatch) {
+      weekly = `${weeklyMatch[1]}%`;
+      weeklyReset = weeklyMatch[2].trim();
+    }
+
+    // Calculate time until reset (parse "Jun 12, 2:39am" format)
+    const calculateTimeUntilReset = (resetStr) => {
+      try {
+        const now = new Date();
+        const currentYear = now.getFullYear();
+        
+        // Parse reset string like "Jun 12, 2:39am" or "Jun 13, 12am"
+        // Use regex to extract month, day, time, and am/pm
+        const match = resetStr.match(/(\w+)\s+(\d+),\s+(\d+):?(\d*)([ap]m)/i);
+        if (!match) return resetStr;
+        
+        const [, month, day, hour, minute, ampm] = match;
+        
+        // Parse time
+        let hourNum = parseInt(hour);
+        if (ampm.toLowerCase() === 'pm' && hourNum !== 12) hourNum += 12;
+        if (ampm.toLowerCase() === 'am' && hourNum === 12) hourNum = 0;
+        const minNum = minute ? parseInt(minute) : 0;
+        
+        // Create date
+        const resetDate = new Date(currentYear, 
+          new Date(`${month} 1`).getMonth(), 
+          parseInt(day),
+          hourNum,
+          minNum,
+          0
+        );
+        
+        // If reset date is in the past, assume next occurrence
+        if (resetDate < now) {
+          if (resetDate.getMonth() === 11) { // December
+            resetDate.setFullYear(currentYear + 1);
+            resetDate.setMonth(0); // January
+          } else {
+            resetDate.setMonth(resetDate.getMonth() + 1);
+          }
+        }
+        
+        const diffMs = resetDate - now;
+        const hours = Math.floor(diffMs / (1000 * 60 * 60));
+        const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+        
+        return `${hours}h ${minutes}m`;
+      } catch (e) {
+        console.error(`Failed to parse reset time: ${resetStr}`, e);
+        return resetStr;
+      }
+    };
+
+    const sessionResetCountdown = calculateTimeUntilReset(sessionReset);
+    const weeklyResetCountdown = calculateTimeUntilReset(weeklyReset);
+
+    // Determine status
+    let status = "ok";
+    try {
+      const s = parseInt(session.replace('%', ''));
+      const w = parseInt(weekly.replace('%', ''));
+      if (s > 90 || w > 90) {
+        status = "crit";
+      } else if (s > 70 || w > 70) {
+        status = "warn";
+      }
+    } catch (e) {
+      status = "unk";
+    }
+
+    cache = {
+      session,
+      weekly,
+      sessionReset,
+      weeklyReset,
+      sessionResetIn: sessionResetCountdown,
+      weeklyResetIn: weeklyResetCountdown,
+      status,
+      timestamp: new Date().toISOString(),
+      lastError: null
+    };
+
+    console.log(`✓ Cached: session=${session} (resets in ${sessionResetCountdown}), weekly=${weekly} (resets in ${weeklyResetCountdown}), status=${status}`);
+  } catch (error) {
+    const err = `Failed to call Claude: ${error.message}`;
+    console.error(`✗ ${err}`);
+    cache.lastError = err;
+    cache.status = "error";
+  }
+}
+
+// Poll every 30 seconds
+setInterval(pollClaudeUsage, 30000);
+
+// Initial poll on startup
+console.log("Starting Claude Usage API Server");
+console.log("Performing initial poll...");
+pollClaudeUsage();
+
+// ============ Routes ============
+app.get('/usage', (req, res) => {
+  res.json(cache);
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: cache.lastError ? "degraded" : "up",
+    timestamp: new Date().toISOString(),
+    lastPoll: cache.timestamp,
+    lastError: cache.lastError
+  });
+});
+
+app.get('/', (req, res) => {
+  res.json({
+    service: "Claude Usage API",
+    version: "1.0",
+    endpoints: {
+      "/usage": "Get session/weekly usage percentages",
+      "/health": "Health check"
+    },
+    current: cache
+  });
+});
+
+// ============ Start Server ============
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✓ API Server listening on 0.0.0.0:${PORT}`);
+  console.log(`   GET http://localhost:${PORT}/usage`);
+  console.log(`   GET http://localhost:${PORT}/health`);
+});

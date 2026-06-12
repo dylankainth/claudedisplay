@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  claude-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: claude-usage-api
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    volumes:
+      # Mount ~/.claude so Claude Code can access credentials
+      - ~/.claude:/root/.claude
+      - ~/.ssh:/root/.ssh:ro
+    networks:
+      - bridge
+
+networks:
+  bridge:
+    driver: bridge

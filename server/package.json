@@ -1,0 +1,12 @@
+{
+  "name": "claude-api-server",
+  "version": "1.0.0",
+  "description": "Claude Usage API Server",
+  "main": "api_server.js",
+  "scripts": {
+    "start": "node api_server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
